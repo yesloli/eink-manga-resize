@@ -58,7 +58,7 @@ EPUB 这一路有几个容易漏的点，这里都处理了：
 
 ### 方式一：直接用 EXE（推荐普通用户）
 
-1. 到 [Releases](../../releases) 下载最新的 `墨水屏阅读器漫画优化.exe`
+1. 到 [Releases](../../releases) 下载最新的 `eink-manga-resize-v1.0-windows-x64.exe`（下载后的文件名是英文的，双击运行后界面是中文）
 2. 双击运行。首次启动请让 Windows Defender 的 SmartScreen 选「更多信息 → 仍要运行」——单文件 EXE 没有代码签名，属于正常现象
 3. 如果需要处理 MOBI / AZW3，先装 [Calibre](https://calibre-ebook.com/download_windows)；处理其余格式不需要
 

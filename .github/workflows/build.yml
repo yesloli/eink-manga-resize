@@ -56,6 +56,20 @@ jobs:
       - name: 打包
         run: pyinstaller --noconfirm --clean manga_resize.spec
 
+      - name: 生成 Release 用的 ASCII 文件名副本
+        shell: pwsh
+        run: |
+          # 发布动作处理非 ASCII 附件名时会丢掉原名：实测中文名变成了 default.exe，
+          # release 页面靠 label 仍显示中文，但下载存盘就是 default.exe。
+          # 这里另存一份纯 ASCII 命名的副本专供 Release。
+          # 脚本里刻意不出现中文字面量 —— Windows 上脚本编码不稳，用通配符更可靠。
+          $dst = "dist\eink-manga-resize-${{ github.ref_name }}-windows-x64.exe"
+          $leaf = Split-Path $dst -Leaf
+          $src = Get-ChildItem "dist\*.exe" | Where-Object { $_.Name -ne $leaf } | Select-Object -First 1
+          if (-not $src) { throw "未找到打包产物" }
+          Copy-Item $src.FullName $dst
+          Get-ChildItem "dist\*.exe" | ForEach-Object { "{0}  {1:N1} MB" -f $_.Name, ($_.Length / 1MB) }
+
       - name: 无头自检
         shell: pwsh
         run: |
@@ -70,17 +84,18 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: eink-manga-resize-windows
-          path: dist/墨水屏阅读器漫画优化.exe
+          path: dist/*.exe
           if-no-files-found: error
 
       - name: 发布 Release
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
-          files: dist/墨水屏阅读器漫画优化.exe
+          files: dist/eink-manga-resize-*-windows-x64.exe
           generate_release_notes: true
           body: |
-            下载下面的 `墨水屏阅读器漫画优化.exe`，双击即用，无需安装。
+            下载下面的 `eink-manga-resize-${{ github.ref_name }}-windows-x64.exe`，双击即用，无需安装。
+            程序内的界面名是「墨水屏阅读器漫画优化」。
 
             处理 MOBI / AZW3 需要另外安装 [Calibre](https://calibre-ebook.com/download_windows)；
             处理 EPUB / ZIP / CBZ / PDF 不需要任何额外依赖。
