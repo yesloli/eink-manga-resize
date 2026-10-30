@@ -1,0 +1,88 @@
+name: build
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  # 每次推送/PR 只做语法与导入检查，几十秒出结果
+  check:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements*.txt
+
+      - name: 安装依赖
+        run: pip install -r requirements-dev.txt
+
+      - name: 语法检查
+        run: python -m py_compile manga_resize.py resize_core.py readers_db.py build_icon.py
+
+      - name: 导入检查（确保引擎与机型库能被加载）
+        run: |
+          python -c "import resize_core, readers_db; print('models:', sum(len(v) for v in readers_db.BRANDS.values()))"
+
+      - name: 机型参数一致性校验（对角线像素 ÷ 英寸 ≈ ppi）
+        run: python -c "import math, readers_db as r; bad=[(b,d[0]) for b,v in r.BRANDS.items() for d in v if d[3]>0 and abs(math.hypot(d[1],d[2])/d[3]-d[4])/d[4]>0.06]; print('inconsistent:', bad); raise SystemExit(1 if bad else 0)"
+
+  # 打 tag 或手动触发时，才真正打包 EXE
+  build:
+    needs: check
+    if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements*.txt
+
+      - name: 安装依赖
+        run: pip install -r requirements-dev.txt
+
+      - name: 打包
+        run: pyinstaller --noconfirm --clean manga_resize.spec
+
+      - name: 无头自检
+        shell: pwsh
+        run: |
+          # 打包出来的是 GUI 子系统程序，PowerShell 直接用 & 调用不会等待，
+          # 必须 Start-Process -Wait，否则下一步读不到报告文件
+          $p = Start-Process -FilePath "dist\墨水屏阅读器漫画优化.exe" `
+               -ArgumentList "--selftest","selftest.txt" -PassThru -Wait
+          Get-Content selftest.txt
+          if ($p.ExitCode -ne 0) { throw "selftest 退出码 $($p.ExitCode)" }
+
+      - name: 上传构建产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: eink-manga-resize-windows
+          path: dist/墨水屏阅读器漫画优化.exe
+          if-no-files-found: error
+
+      - name: 发布 Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/墨水屏阅读器漫画优化.exe
+          generate_release_notes: true
+          body: |
+            下载下面的 `墨水屏阅读器漫画优化.exe`，双击即用，无需安装。
+
+            处理 MOBI / AZW3 需要另外安装 [Calibre](https://calibre-ebook.com/download_windows)；
+            处理 EPUB / ZIP / CBZ / PDF 不需要任何额外依赖。
+
+            首次运行如遇 SmartScreen 提示，选「更多信息 → 仍要运行」——单文件 EXE 未做代码签名，属正常现象。

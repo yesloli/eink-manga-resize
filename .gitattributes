@@ -1,0 +1,12 @@
+# 统一换行符：仓库内一律 LF，避免 Windows 开发者提交 CRLF 造成整文件 diff
+* text=auto eol=lf
+
+# 批处理必须是 CRLF，否则 cmd 解析会出问题
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# 二进制，不做换行与 diff 处理
+*.ico binary
+*.png binary
+*.jpg binary
+*.exe binary

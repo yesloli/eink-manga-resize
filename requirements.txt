@@ -1,0 +1,6 @@
+# 运行时依赖
+# 三个包都是跨平台的；ffmpeg 与 Calibre 属于外部程序，不在这里声明（见 README）
+
+pypdfium2>=4.30.0    # PDF 解析与渲染。用 pdfium 而不是 PyMuPDF，体积小一个量级
+tkinterdnd2>=0.4.0   # 把文件拖进窗口
+Pillow>=10.0.0       # 图片尺寸探测、PDF 合成、ffmpeg 缺失时的缩放兜底、图标生成
