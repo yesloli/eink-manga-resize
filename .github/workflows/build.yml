@@ -75,7 +75,7 @@ jobs:
         run: |
           # 打包出来的是 GUI 子系统程序，PowerShell 直接用 & 调用不会等待，
           # 必须 Start-Process -Wait，否则下一步读不到报告文件
-          $p = Start-Process -FilePath "dist\墨水屏阅读器漫画优化.exe" `
+          $p = Start-Process -FilePath "dist\墨水屏阅读器点对点适配.exe" `
                -ArgumentList "--selftest","selftest.txt" -PassThru -Wait
           Get-Content selftest.txt
           if ($p.ExitCode -ne 0) { throw "selftest 退出码 $($p.ExitCode)" }
@@ -95,7 +95,7 @@ jobs:
           generate_release_notes: true
           body: |
             下载下面的 `eink-manga-resize-${{ github.ref_name }}-windows-x64.exe`，双击即用，无需安装。
-            程序内的界面名是「墨水屏阅读器漫画优化」。
+            程序内的界面名是「墨水屏阅读器点对点适配」。
 
             处理 MOBI / AZW3 需要另外安装 [Calibre](https://calibre-ebook.com/download_windows)；
             处理 EPUB / ZIP / CBZ / PDF 不需要任何额外依赖。

@@ -52,7 +52,7 @@ exe = EXE(
     a.binaries,
     a.datas,
     [],
-    name="墨水屏阅读器漫画优化",
+    name="墨水屏阅读器点对点适配",
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,

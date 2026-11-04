@@ -1,21 +1,30 @@
 # -*- coding: utf-8 -*-
 """
-生成应用图标：墨青底 + 白色「漫」+ 细白圆环。
+生成应用图标：墨青底 + 微胶囊。
+
+为什么是微胶囊
+--------------
+电子墨水的物理结构就是一颗颗微胶囊：里面悬浮着带正电的白色粒子和带负电的
+黑色粒子，加电场后黑白换位，像素就变了颜色。这个符号既准确又不像「一格
+灰阶条」那样容易被误认成柱状图。
+
+尺寸分级
+--------
+小图标不能等比缩小大图标——胶囊里的粒子在 24px 以下会糊成噪点。所以：
+  ≥96px  每半 6 颗粒子
+  ≥32px  每半 2 颗粒子
+  <32px  不画粒子，只留白 / 墨两截和描边，保证轮廓清楚
+描边试过 12px / 8px / 不加三种：加了会在底部形成一圈白瓷似的弧，
+反而更脏；不加时深色那半和墨青底本身就有足够对比，所以不描边。
 
 产出三份，都写进 assets/：
   app.ico          多尺寸图标（EXE / 快捷方式用）
   app_header.png   72px，界面顶栏用（Tk 只认 png，不认 ico）
   app_sizes.png    16~128px 对照条，用于肉眼检查小尺寸是否糊
-
-字标渲染：先按 getbbox 量出真实墨迹框再居中（中文字形的字身框上下不对称，
-直接按字号框居中会显得偏高）。加粗只在 192px 以上启用——黑体笔画本就密集，
-小图标再描边会糊成一块白斑。
-
-依赖：Pillow，以及一款带「漫」字的中文字体。
 """
 import os
 
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageDraw
 
 BASE = os.path.dirname(os.path.abspath(__file__))
 OUT = os.path.join(BASE, "assets")
@@ -24,75 +33,64 @@ S = 512
 RADIUS = 112
 TEAL = (13, 118, 128, 255)
 WHITE = (255, 255, 255, 255)
-RING = (255, 255, 255, 130)
-CHAR = "漫"
+INK = (10, 40, 45, 255)
 
-# 各平台常见中文字体，按顺序找第一个存在的
-FONT_CANDIDATES = [
-    "C:/Windows/Fonts/simhei.ttf",                     # Windows 黑体
-    "C:/Windows/Fonts/msyhbd.ttc",                     # Windows 雅黑粗体
-    "/System/Library/Fonts/PingFang.ttc",              # macOS
-    "/System/Library/Fonts/STHeiti Medium.ttc",
-    "/usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc",
-    "/usr/share/fonts/truetype/noto/NotoSansCJK-Bold.ttc",
-    "/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc",
-]
+# 胶囊在 512 画布上的位置
+CAP = (172, 62, 340, 450)
 
 
-def find_font() -> str:
-    for p in FONT_CANDIDATES:
-        if os.path.isfile(p):
-            return p
-    env = os.environ.get("MRZ_FONT")
-    if env and os.path.isfile(env):
-        return env
-    raise SystemExit(
-        "找不到可用中文字体。请把路径设进环境变量 MRZ_FONT，"
-        "例如：set MRZ_FONT=D:\\fonts\\SourceHanSans-Bold.otf")
+def dots_for(size: int) -> int:
+    if size >= 96:
+        return 2      # 每半 6 颗
+    if size >= 32:
+        return 1      # 每半 2 颗
+    return 0          # 不画
 
 
-def draw_char(im, ch, color, box, font_path, embolden=False):
-    x0, y0, x1, y1 = box
-    bw, bh = x1 - x0, y1 - y0
-    lo, hi = 32, 900
-    while lo < hi:                       # 二分找最大可用字号
-        mid = (lo + hi + 1) // 2
-        f = ImageFont.truetype(font_path, mid)
-        l, t, r, b = f.getbbox(ch)
-        if (r - l) <= bw and (b - t) <= bh:
-            lo = mid
-        else:
-            hi = mid - 1
-    font = ImageFont.truetype(font_path, lo)
-    l, t, r, b = font.getbbox(ch)
-    px = x0 + (bw - (r - l)) // 2 - l
-    py = y0 + (bh - (b - t)) // 2 - t
-    d = ImageDraw.Draw(im)
-    d.text((px, py), ch, font=font, fill=color)
-    if embolden:
-        for ox, oy in ((1, 0), (-1, 0), (0, 1), (0, -1)):
-            d.text((px + ox, py + oy), ch, font=font, fill=color)
-
-
-def render(size: int, font_path: str) -> Image.Image:
+def render(size: int) -> Image.Image:
     k = size / float(S)
     im = Image.new("RGBA", (size, size), (0, 0, 0, 0))
     d = ImageDraw.Draw(im)
     d.rounded_rectangle([0, 0, size - 1, size - 1],
                         radius=max(2, int(RADIUS * k)), fill=TEAL)
-    # 细白圆环
-    d.ellipse([int(42 * k), int(42 * k), int(470 * k), int(470 * k)],
-              outline=RING, width=max(1, int(8 * k)))
-    draw_char(im, CHAR, WHITE,
-              (int(110 * k), int(96 * k), int(402 * k), int(396 * k)),
-              font_path, embolden=(size >= 192))
+
+    x0, y0, x1, y1 = [v * k for v in CAP]
+    r = (x1 - x0) / 2.0
+    mid = (y0 + y1) / 2.0
+
+    # 用蒙版拼两截：直接画两个圆角矩形的话，各自的圆角会把接缝和底部拱形
+    # 错开，深色那半会缩进白色里露出白边。
+    body = Image.new("L", (size, size), 0)
+    ImageDraw.Draw(body).rounded_rectangle([x0, y0, x1, y1], radius=r, fill=255)
+
+    im.paste(Image.new("RGBA", (size, size), WHITE), (0, 0), body)
+
+    lower = Image.new("L", (size, size), 0)
+    ImageDraw.Draw(lower).rectangle([0, mid, size, size], fill=255)
+    dark_area = Image.new("L", (size, size), 0)
+    dark_area.paste(lower, (0, 0), body)
+    im.paste(Image.new("RGBA", (size, size), INK), (0, 0), dark_area)
+
+    n = dots_for(size)
+    if n:
+        cols = (0.32, 0.68)
+        rows_top = (0.26, 0.44) if n == 1 else (0.22, 0.38, 0.54)
+        rows_bot = (0.62, 0.80) if n == 1 else (0.60, 0.76, 0.92)
+        rad = (15 if n == 1 else 13) * k
+        for cx in cols:
+            px = x0 + (x1 - x0) * cx
+            for ry in rows_top:
+                py = y0 + (y1 - y0) * ry
+                d.ellipse([px - rad, py - rad, px + rad, py + rad], fill=INK)
+            for ry in rows_bot:
+                py = y0 + (y1 - y0) * ry
+                d.ellipse([px - rad, py - rad, px + rad, py + rad], fill=WHITE)
     return im
 
 
 def main():
-    font = find_font()
     os.makedirs(OUT, exist_ok=True)
-    master = render(S, font)
+    master = render(S)
 
     ico = os.path.join(OUT, "app.ico")
     master.save(ico, format="ICO",
@@ -104,16 +102,15 @@ def main():
     print("preview:", png256)
 
     hdr = os.path.join(OUT, "app_header.png")
-    render(72, font).save(hdr)
+    render(72).save(hdr)
     print("header :", hdr)
 
-    # 各尺寸对照条，确认小图不糊
     items = (16, 24, 32, 48, 64, 128)
     width = 8 + sum(items) + 24 * len(items)
     strip = Image.new("RGBA", (width, 140), (238, 241, 246, 255))
     x = 8
     for s in items:
-        ic = render(s, font)
+        ic = render(s)
         strip.paste(ic, (x, (140 - s) // 2), ic)
         x += s + 24
     strip.save(os.path.join(OUT, "app_sizes.png"))

@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-墨水屏阅读器漫画优化 —— GUI 入口。
+墨水屏阅读器点对点适配 —— GUI 入口。
 
 直接运行本文件即可：python manga_resize.py
 """
@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import os
 import queue
+import re
 import sys
 import threading
 import traceback
@@ -21,7 +22,7 @@ import resize_core as core
 import novel_core
 import readers_db
 
-APP_NAME = "墨水屏阅读器漫画优化"
+APP_NAME = "墨水屏阅读器点对点适配"
 APP_VER = "1.1"
 CALIBRE_URL = "https://calibre-ebook.com/download_windows"
 KF8_EXT = (".mobi", ".azw3", ".azw", ".prc")
@@ -1084,8 +1085,11 @@ class App:
                     txt += "   %.2f 寸" % inch
                 if ppi:
                     txt += "   %d ppi" % ppi
-                if len(d) > 6 and d[6]:
-                    txt += "\n" + str(d[6])
+                note = str(d[6]) if len(d) > 6 and d[6] else ""
+                # 备注若只是重复「N 英寸」，上面已经显示过了，不再占一行
+                if note and not re.fullmatch(
+                        r"\s*\d+(\.\d+)?\s*英寸\s*([\s，,]*\d+\s*ppi)?\s*", note):
+                    txt += "\n" + note
                 if not certain:
                     txt += "\n⚠ 该型号参数待核，建议以设备实测为准"
                 self.dev_lbl.configure(text=txt,
