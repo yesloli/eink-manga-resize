@@ -18,10 +18,11 @@ import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 
 import resize_core as core
+import novel_core
 import readers_db
 
 APP_NAME = "墨水屏阅读器漫画优化"
-APP_VER = "1.0"
+APP_VER = "1.1"
 CALIBRE_URL = "https://calibre-ebook.com/download_windows"
 KF8_EXT = (".mobi", ".azw3", ".azw", ".prc")
 
@@ -72,6 +73,12 @@ DEFAULT_CFG = {
     "last_dir": "",
     "geom": "",
     "custom_devices": {},           # {brand: [[model,w,h,inch,ppi,note], ...]}
+    # ---- 轻小说模块 ----
+    "module": "comic",              # comic | novel
+    "nv_w": 1440,                   # 屏幕宽
+    "nv_h": 1920,                   # 屏幕高
+    "nv_col": 1300,                 # 版心宽
+    "nv_rot": 2,                    # 跨页旋转方向：1=顺时针 2=逆时针
 }
 
 
@@ -353,11 +360,27 @@ class App:
         shell = tk.Frame(wrap, bg=CARD)
         shell.grid(row=0, column=0, sticky="nsew", padx=10, pady=10)
         shell.columnconfigure(0, weight=1)
-        shell.rowconfigure(1, weight=1)
+        shell.rowconfigure(2, weight=1)
+
+        # 模块切换：漫画 / 轻小说
+        modbar = tk.Frame(shell, bg="#dbe4f2")
+        modbar.grid(row=0, column=0, sticky="ew", pady=(0, 7))
+        self.mod_btns = []
+        for i, (key, title) in enumerate((("comic", "漫画"), ("novel", "轻小说"))):
+            modbar.columnconfigure(i, weight=1)
+            cell = tk.Frame(modbar, bg="#dbe4f2", cursor="hand2")
+            cell.grid(row=0, column=i, sticky="ew",
+                      padx=(0, 3) if i == 0 else (3, 0))
+            lbl = tk.Label(cell, text=title, bg="#dbe4f2", fg=MUTED,
+                           font=("Microsoft YaHei UI", 10, "bold"), cursor="hand2")
+            lbl.pack(pady=4)
+            for w in (cell, lbl):
+                w.bind("<Button-1>", lambda e, k=key: self.set_module(k))
+            self.mod_btns.append((key, cell, lbl))
 
         # 分段式页签（替代 Notebook，选中态更明确）
         bar = tk.Frame(shell, bg="#e9eef6")
-        bar.grid(row=0, column=0, sticky="ew")
+        bar.grid(row=1, column=0, sticky="ew")
         self.tab_btns = []
         for i, (title, sub) in enumerate((("目标", "屏幕 / 缩放"),
                                           ("输出", "位置 / 质量"))):
@@ -376,15 +399,18 @@ class App:
             self.tab_btns.append((cell, lbl, slbl))
 
         holder = tk.Frame(shell, bg=CARD)
-        holder.grid(row=1, column=0, sticky="nsew")
+        holder.grid(row=2, column=0, sticky="nsew")
         holder.columnconfigure(0, weight=1)
         holder.rowconfigure(0, weight=1)
-        tab1 = tk.Frame(holder, bg=CARD)
-        tab2 = tk.Frame(holder, bg=CARD)
-        for f in (tab1, tab2):
+        tab1 = tk.Frame(holder, bg=CARD)     # 漫画：目标
+        tab2 = tk.Frame(holder, bg=CARD)     # 两者共用：输出
+        tab3 = tk.Frame(holder, bg=CARD)     # 轻小说：目标
+        for f in (tab1, tab2, tab3):
             f.grid(row=0, column=0, sticky="nsew")
-        self.tab_pages = [tab1, tab2]
+        self.tab_pages = [tab1, tab2, tab3]
         self.tab_index = 0
+        self.module = "comic"
+        self._build_novel_pane(tab3)
 
         # ---- 目标 ----
         tab1.columnconfigure(1, weight=1)
@@ -457,8 +483,7 @@ class App:
 
         self.fit_hint = ttk.Label(
             tab1, style="Hint.TLabel", wraplength=330, justify="left",
-            text="每页等比缩放到刚好放进屏幕：竖版页高度贴满、横跨页宽度贴满，"
-                 "另一边留白。画面永远完整，不会被切开或切掉。")
+            text="整页图等比贴满屏幕，另一边留白。")
         self.fit_hint.grid(row=5, column=0, columnspan=3, sticky="w", padx=10, pady=(4, 6))
 
         # 横跨页优化（可选）
@@ -594,8 +619,11 @@ class App:
         self.switch_tab(0)
 
     def switch_tab(self, idx):
+        # 页签只有「目标 / 输出」两个，但「目标」要根据模块指向不同的页：
+        # 漫画是 tab_pages[0]，轻小说是 tab_pages[2]，输出页两者共用。
+        page = 2 if (idx == 0 and self.module == "novel") else idx
         for j, f in enumerate(self.tab_pages):
-            if j == idx:
+            if j == page:
                 f.grid()
             else:
                 f.grid_remove()
@@ -606,6 +634,134 @@ class App:
             lbl.configure(bg=bg, fg="#ffffff" if on else MUTED)
             slbl.configure(bg=bg, fg="#cbdcff" if on else "#9aa7b8")
         self.tab_index = idx
+
+    # ---------------- 轻小说面板 ----------------
+    def _build_novel_pane(self, pane):
+        pane.columnconfigure(1, weight=1)
+
+        tk.Label(pane, text="屏幕与版心", bg=CARD, fg=TEXT,
+                 font=("Microsoft YaHei UI", 9, "bold")).grid(
+            row=0, column=0, columnspan=4, sticky="w", padx=10, pady=(12, 3))
+
+        ttk.Label(pane, text="屏幕宽", style="Card.TLabel").grid(
+            row=1, column=0, sticky="w", padx=10, pady=3)
+        self.nv_w_var = tk.IntVar(value=1440)
+        ttk.Spinbox(pane, from_=200, to=10000, textvariable=self.nv_w_var,
+                    width=7, command=self.on_novel_input).grid(row=1, column=1, sticky="w")
+        ttk.Label(pane, text="× 高", style="Card.TLabel").grid(
+            row=1, column=2, sticky="e", padx=(8, 4))
+        self.nv_h_var = tk.IntVar(value=1920)
+        ttk.Spinbox(pane, from_=200, to=10000, textvariable=self.nv_h_var,
+                    width=7, command=self.on_novel_input).grid(
+            row=1, column=3, sticky="w", padx=(0, 10))
+
+        ttk.Label(pane, text="版心宽", style="Card.TLabel").grid(
+            row=2, column=0, sticky="w", padx=10, pady=3)
+        self.nv_col_var = tk.IntVar(value=1300)
+        ttk.Spinbox(pane, from_=200, to=10000, textvariable=self.nv_col_var,
+                    width=7, command=self.on_novel_input).grid(row=2, column=1, sticky="w")
+        self.nv_ratio_lbl = ttk.Label(pane, text="", style="Hint.TLabel")
+        self.nv_ratio_lbl.grid(row=2, column=2, columnspan=2, sticky="w")
+
+        ttk.Label(pane, justify="left", wraplength=330, style="Hint.TLabel",
+                  text="「屏幕宽高」可先到「漫画」模块选好机型，把那里显示的数字抄过来。\n"
+                       "「版心宽」是正文区宽度，比屏幕窄（左右有页边距）。拿不准就用下面的按钮测。"
+                  ).grid(row=3, column=0, columnspan=4, sticky="w", padx=10, pady=(5, 5))
+
+        bf = ttk.Frame(pane, style="Card.TFrame")
+        bf.grid(row=4, column=0, columnspan=4, sticky="w", padx=10, pady=(0, 4))
+        ttk.Button(bf, text="生成测试页", command=self.gen_test_page).pack(side="left")
+        ttk.Button(bf, text="从截图识别…", command=self.pick_shot).pack(side="left", padx=8)
+
+        ttk.Separator(pane, orient="horizontal").grid(
+            row=5, column=0, columnspan=4, sticky="ew", padx=10, pady=9)
+
+        ttk.Label(pane, text="跨页旋转", style="Card.TLabel").grid(
+            row=6, column=0, sticky="w", padx=10)
+        self.nv_rot_var = tk.StringVar(value="逆时针")
+        rf = ttk.Frame(pane, style="Card.TFrame")
+        rf.grid(row=6, column=1, columnspan=3, sticky="w")
+        for txt in ("逆时针", "顺时针"):
+            ttk.Radiobutton(rf, text=txt, value=txt, variable=self.nv_rot_var,
+                            command=self.delay_save).pack(side="left", padx=(0, 12))
+
+        ttk.Label(pane, justify="left", wraplength=330, style="Hint.TLabel",
+                  text="宽高比超过 1.35 的整页插图转 90° 后撑满整页，看时把设备转过来。"
+                       "方向反了就换另一个。").grid(
+            row=7, column=0, columnspan=4, sticky="w", padx=10, pady=(3, 0))
+
+        box = tk.Frame(pane, bg="#f2f6ff", highlightbackground="#d7e3fb",
+                       highlightthickness=1)
+        box.grid(row=8, column=0, columnspan=4, sticky="ew", padx=10, pady=(12, 6))
+        self.nv_sum = tk.Label(box, text="", bg="#f2f6ff", fg="#1e40af",
+                               justify="left", anchor="w",
+                               font=("Microsoft YaHei UI", 8))
+        self.nv_sum.pack(fill="x", padx=10, pady=7)
+
+        rules = tk.Frame(pane, bg=CARD)
+        rules.grid(row=9, column=0, columnspan=4, sticky="ew", padx=10, pady=(2, 8))
+        tk.Label(rules, text="这个模式怎么处理", bg=CARD, fg=MUTED,
+                 font=("Microsoft YaHei UI", 8, "bold")).pack(anchor="w")
+        for line in ("插图页：等比贴满屏幕，宽图转 90° 后撑满整页",
+                     "混排页：内嵌图缩到版心宽，排版结构一点不动",
+                     "文字页：不碰",
+                     "改完自动做结构校验，改坏的页会放弃改动并提示"):
+            tk.Label(rules, text="· " + line, bg=CARD, fg=MUTED,
+                     font=("Microsoft YaHei UI", 8), anchor="w",
+                     justify="left", wraplength=330).pack(anchor="w", pady=1)
+
+        # 手输数字也要即时生效，Spinbox 的 command 只响应箭头
+        for v in (self.nv_w_var, self.nv_h_var, self.nv_col_var):
+            v.trace_add("write", lambda *a: self.on_novel_input())
+
+    def on_novel_input(self, *_):
+        try:
+            w = int(self.nv_w_var.get())
+            c = int(self.nv_col_var.get())
+        except Exception:
+            if getattr(self, "nv_sum", None):
+                self.nv_sum.configure(text="屏幕宽与版心宽需要填整数。")
+            return
+        if getattr(self, "nv_sum", None):
+            if c > w:
+                self.nv_sum.configure(text="版心宽不能大于屏幕宽。")
+            else:
+                self.nv_sum.configure(
+                    text="本次输出：屏幕 %d×%d，版心 %d（%.1f%%）\n"
+                         "插图页贴屏，混排页内嵌图贴版心；文件名后缀 %s"
+                    % (w, int(self.nv_h_var.get() or 0), c, c / float(w) * 100,
+                       novel_core.NovelTarget(w, int(self.nv_h_var.get() or 1920), c).suffix()))
+        self.delay_save()
+
+    def _style_module(self):
+        for k, cell, lbl in self.mod_btns:
+            on = (k == self.module)
+            bg = ACCENT if on else "#dbe4f2"
+            cell.configure(bg=bg)
+            lbl.configure(bg=bg, fg="#ffffff" if on else MUTED)
+
+    def set_module(self, key):
+        if key == self.module:
+            return
+        self.module = key
+        self._style_module()
+        self._apply_table_style()
+        self.switch_tab(self.tab_index)
+        self.delay_save()
+        if self.files:
+            self.log("切换到%s模块" % ("轻小说" if key == "novel" else "漫画"), "muted")
+            self.scan_all(silent=True)
+
+    def _apply_table_style(self):
+        if self.module == "novel":
+            heads = [("name", "文件", 236), ("fmt", "格式", 56), ("size", "体积", 72),
+                     ("n", "插图页", 58), ("h", "混排页", 58), ("verdict", "状态", 100)]
+        else:
+            heads = [("name", "文件", 250), ("fmt", "格式", 58), ("size", "体积", 74),
+                     ("n", "图片", 56), ("h", "高度", 152), ("verdict", "状态", 84)]
+        for k, t, w in heads:
+            self.tree.heading(k, text=t)
+            self.tree.column(k, width=w)
 
     def _build_log(self, parent):
         wrap = tk.Frame(parent, bg=CARD, highlightbackground=LINE,
@@ -669,6 +825,22 @@ class App:
         self.on_rotate()
         self.on_out()
 
+        # 轻小说模块的参数
+        self.nv_w_var.set(int(c.get("nv_w", 1440) or 1440))
+        self.nv_h_var.set(int(c.get("nv_h", 1920) or 1920))
+        self.nv_col_var.set(int(c.get("nv_col", 1300) or 1300))
+        self.nv_rot_var.set("顺时针" if int(c.get("nv_rot", 2) or 2) == 1 else "逆时针")
+        self.on_novel_input()
+        # 恢复上次的模块
+        if c.get("module") == "novel":
+            self.module = "comic"          # 让 set_module 认为发生了切换
+            self.set_module("novel")
+        else:
+            self.set_module("comic")
+        self._style_module()
+        self._apply_table_style()
+        self.switch_tab(0)
+
     def _refresh_models(self, want=None):
         devs = self.catalog.get(self.brand_var.get(), [])
         names = [d[0] for d in devs]
@@ -699,6 +871,55 @@ class App:
                 return core.Target(d[1], d[2])
             return core.Target(w, h)
         return core.Target(w, h)
+
+    def current_novel_target(self):
+        try:
+            w = int(self.nv_w_var.get())
+            h = int(self.nv_h_var.get())
+            c = int(self.nv_col_var.get())
+        except Exception:
+            w, h, c = 1440, 1920, 1300
+        return novel_core.NovelTarget(w, h, c)
+
+    def gen_test_page(self):
+        path = filedialog.asksaveasfilename(
+            parent=self.root, title="保存标定测试页",
+            initialfile=novel_core.TEST_EPUB_NAME,
+            defaultextension=".epub",
+            filetypes=[("EPUB 电子书", "*.epub")],
+            initialdir=self.cfg.get("last_dir") or None)
+        if not path:
+            return
+        r = novel_core.build_test_epub(path)
+        if not r["ok"]:
+            messagebox.showerror(APP_NAME, r["msg"])
+            return
+        self.log("已生成标定测试页：%s（%.1f KB）" % (r["path"], r["size_kb"]), "ok")
+        messagebox.showinfo(APP_NAME, "已生成：\n%s\n\n接下来：\n%s"
+                            % (r["path"], novel_core.GUIDE))
+
+    def pick_shot(self):
+        path = filedialog.askopenfilename(
+            parent=self.root, title="选择标定页截图",
+            filetypes=[("图片", "*.png *.jpg *.jpeg *.bmp"), ("全部文件", "*.*")])
+        if not path:
+            return
+        r = novel_core.analyze_shot(path)
+        if not r["ok"]:
+            self.log("截图识别失败：%s" % r["reason"], "warn")
+            messagebox.showwarning(APP_NAME, r["reason"])
+            return
+        w, h = r["screen"]
+        self.nv_w_var.set(w)
+        self.nv_h_var.set(h)
+        self.nv_col_var.set(r["column"])
+        self.log("截图识别：屏幕 %d×%d，版心 %d（%.1f%%）"
+                 % (w, h, r["column"], r["ratio"] * 100), "ok")
+        msg = "屏幕分辨率：%d × %d\n版心宽度：%d px\n\n%s" % (
+            w, h, r["column"], r["reason"])
+        if r.get("warn"):
+            msg += "\n\n注意：%s" % r["warn"]
+        messagebox.showinfo(APP_NAME, msg)
 
     def on_mode(self, *_):
         auto = self.mode_var.get() == "auto"
@@ -823,6 +1044,11 @@ class App:
             "calibre": self.cfg.get("calibre", ""),
             "last_dir": self.cfg.get("last_dir", ""),
             "custom_devices": self.cfg.get("custom_devices", {}),
+            "module": self.module,
+            "nv_w": _int(self.nv_w_var, 1440),
+            "nv_h": _int(self.nv_h_var, 1920),
+            "nv_col": _int(self.nv_col_var, 1300),
+            "nv_rot": 1 if "顺" in self.nv_rot_var.get() else 2,
         })
         try:
             c["geom"] = self.root.geometry()
@@ -872,10 +1098,8 @@ class App:
                 text="手动目标：%d × %d px" % (t.w, t.h))
 
         if getattr(self, "sum_lbl", None) is not None:
-            body = ("等比撑满 %d × %d 的屏幕，不裁切；\n"
-                    "竖版页高度贴满，横跨页宽度贴满" % (t.w, t.h))
-            if self.rot_var.get():
-                body += "\n横跨页：转 90° 后撑满整页"
+            body = ("等比撑满 %d × %d，不裁切%s"
+                    % (t.w, t.h, "，横跨页转 90°" if self.rot_var.get() else ""))
             self.sum_lbl.configure(text="本次输出：%s\n文件名后缀：%s"
                                         % (body, t.suffix()))
         self._update_name_preview()
@@ -1051,6 +1275,9 @@ class App:
 
     def _row(self, p, info):
         ext = info["ext"].lstrip(".").upper()
+        if self.module == "novel":
+            self._row_novel(p, info, ext)
+            return
         need_cal = self.need_calibre(p)
         if info.get("err"):
             if need_cal:
@@ -1071,8 +1298,49 @@ class App:
         self.tree.insert("", "end", values=vals, tags=(tag[0], alt))
         self.infos[p] = info
 
+    def _row_novel(self, p, info, ext):
+        if info.get("err"):
+            vals = (info["name"], ext, "%.1f MB" % info["size_mb"], "-", "-", "读取失败")
+            tag = "err"
+        elif info.get("need") is None:
+            vals = (info["name"], ext, "%.1f MB" % info["size_mb"], "-", "-", "转换后处理")
+            tag = "warn"
+        else:
+            n = info.get("need", 0)
+            v = "已适配" if n == 0 else "需处理 %d 张" % n
+            tag = "ok" if n == 0 else "warn"
+            vals = (info["name"], ext, "%.1f MB" % info["size_mb"],
+                    str(info.get("page", 0)), str(info.get("mixed", 0)), v)
+        alt = "even" if len(self.tree.get_children()) % 2 else "odd"
+        self.tree.insert("", "end", values=vals, tags=(tag, alt))
+        self.infos[p] = info
+
+    def scan_one(self, path, module=None, target=None):
+        """按模块选择扫描方式。
+
+        module / target 必须由主线程算好再传进来——工作线程里读 Tk 变量会抛
+        RuntimeError: main thread is not in main loop。
+        """
+        module = module or self.module
+        if module != "novel":
+            return core.scan(path, target or self.current_target())
+        ext = os.path.splitext(path)[1].lower()
+        size = os.path.getsize(path) / 1048576.0
+        if ext in novel_core.KF8_EXT:
+            return {"path": path, "name": os.path.basename(path), "ext": ext,
+                    "size_mb": size, "page": 0, "mixed": 0, "need": None,
+                    "err": "", "kind": "novel_kf8"}
+        if ext != ".epub":
+            return {"path": path, "name": os.path.basename(path), "ext": ext,
+                    "size_mb": size, "page": 0, "mixed": 0, "need": None,
+                    "err": "轻小说模式只处理 EPUB / MOBI / AZW3"}
+        return novel_core.scan_novel(path, target or self.current_novel_target())
+
     def rescan_existing(self):
         """目标参数变了只需重算判定，不必重新读文件。"""
+        if self.module == "novel":
+            # 轻小说的判定要读 XHTML 才能得出，重算等于重扫，交给显式操作触发
+            return
         if not self.files or not self.infos:
             return
         target = self.current_target()
@@ -1092,7 +1360,9 @@ class App:
         if self.busy:
             return
         self.busy = True
-        target = self.current_target()
+        module = self.module
+        target = (self.current_novel_target() if module == "novel"
+                  else self.current_target())
         files = list(self.files)
         self._set_busy_ui(True, "扫描中…")
         self.pbar.configure(mode="determinate", value=0, maximum=len(files))
@@ -1102,7 +1372,7 @@ class App:
             for i, f in enumerate(files, 1):
                 if self.stop_flag.is_set():
                     break
-                info = core.scan(f, target)
+                info = self.scan_one(f, module, target)
                 self.q.put(("scan", f, info))
                 self.q.put(("progress", i, len(files), "扫描 %d/%d" % (i, len(files))))
                 ok += 1
@@ -1113,6 +1383,8 @@ class App:
 
     # ---------------- 处理 ----------------
     def start(self, apply: bool):
+        if self.module == "novel":
+            return self.start_novel(apply)
         if self.busy:
             self.status.configure(text="正在忙，等当前任务结束再试")
             return
@@ -1291,6 +1563,150 @@ class App:
         self.worker = threading.Thread(target=run, daemon=True)
         self.worker.start()
 
+    def start_novel(self, apply: bool):
+        if self.busy:
+            self.status.configure(text="正在忙，等当前任务结束再试")
+            return
+        if not self.files:
+            messagebox.showinfo(APP_NAME, "先添加文件。")
+            return
+        t = self.current_novel_target()
+        if t.column > t.w:
+            messagebox.showwarning(APP_NAME, "版心宽不能大于屏幕宽。")
+            return
+        kf8 = [f for f in self.files
+               if os.path.splitext(f)[1].lower() in novel_core.KF8_EXT]
+        if kf8 and not self.calibre:
+            messagebox.showwarning(
+                APP_NAME, "列表里有 %d 个 MOBI / AZW3，处理它们需要 Calibre。" % len(kf8))
+            return
+        self.save_now()
+
+        opts = core.Options(quality=2,
+                            overwrite=bool(self.overwrite_var.get()),
+                            ffmpeg=self.ffmpeg, calibre=self.calibre,
+                            rotate_dir=2 if self.nv_rot_var.get() == "逆时针" else 1)
+
+        inplace = self.out_var.get() == "inplace"
+        out_dir = None
+        if self.out_var.get() == "custom":
+            out_dir = self.out_entry.get().strip()
+            if not out_dir:
+                messagebox.showwarning(APP_NAME, "请选择输出目录。")
+                return
+            try:
+                os.makedirs(out_dir, exist_ok=True)
+            except Exception as e:
+                messagebox.showerror(APP_NAME, "输出目录不可用：%s" % e)
+                return
+
+        if apply and inplace:
+            if not messagebox.askyesno(
+                    APP_NAME,
+                    "将直接覆盖列表里的 %d 个源文件，原始内容不可恢复。\n\n"
+                    "已经是目标尺寸的插图会自动跳过。\n\n确定继续吗？" % len(self.files)):
+                return
+
+        self.stop_flag.clear()
+        self.busy = True
+        self._set_busy_ui(True, "处理中…")
+        self.pbar.configure(mode="determinate", value=0, maximum=100)
+        files = list(self.files)
+        self.log("")
+        self.log("── %s ──  轻小说：%s%s"
+                 % ("开始处理" if apply else "预演扫描", t.label(),
+                    "" if apply else "（不改动任何文件）"), "info")
+
+        def run():
+            total = len(files)
+            done = skipped = failed = 0
+            for idx, src in enumerate(files, 1):
+                if self.stop_flag.is_set():
+                    self.q.put(("log", "已停止。", "warn"))
+                    break
+                name = os.path.basename(src)
+                info = self.infos.get(src) or {}
+                need = info.get("need")
+
+                if apply and need == 0:
+                    self.q.put(("log", "  [%d/%d] %s  →  已适配，跳过" % (idx, total, name), "muted"))
+                    skipped += 1
+                    self.q.put(("progress", idx, total, name))
+                    continue
+
+                if not apply:
+                    if info.get("err"):
+                        self.q.put(("log", "  [%d/%d] %s  →  %s"
+                                    % (idx, total, name, info["err"]), "err"))
+                        failed += 1
+                    elif need is None:
+                        self.q.put(("log", "  [%d/%d] %s  →  需 Calibre 转换后处理"
+                                    % (idx, total, name), "warn"))
+                        done += 1
+                    else:
+                        self.q.put(("log", "  [%d/%d] %s  →  需处理 %d 张（插图页 %d / 混排 %d）"
+                                    % (idx, total, name, need,
+                                       info.get("page", 0), info.get("mixed", 0)), "ok"))
+                        done += 1
+                    self.q.put(("progress", idx, total, name))
+                    continue
+
+                if info.get("err"):
+                    self.q.put(("log", "  [%d/%d] %s  →  %s"
+                                % (idx, total, name, info["err"]), "err"))
+                    failed += 1
+                    self.q.put(("progress", idx, total, name))
+                    continue
+
+                if inplace:
+                    dst = src
+                    self.q.put(("log", "  [%d/%d] %s  →  原地覆盖源文件"
+                                % (idx, total, name), "warn"))
+                else:
+                    d = out_dir or os.path.dirname(src)
+                    stem, ext = os.path.splitext(os.path.basename(src))
+                    dst = os.path.join(d, stem + t.suffix() + ext)
+
+                overwriting = False
+                if not inplace and os.path.exists(dst):
+                    if not opts.overwrite:
+                        self.q.put(("log", "  [%d/%d] %s  →  输出已存在，跳过（未勾选覆盖）"
+                                    % (idx, total, name), "warn"))
+                        skipped += 1
+                        self.q.put(("progress", idx, total, name))
+                        continue
+                    overwriting = True
+                    self.q.put(("log", "  [%d/%d] %s  →  覆盖已有输出"
+                                % (idx, total, name), "warn"))
+
+                self.q.put(("log", "  [%d/%d] %s" % (idx, total, name), "info"))
+                try:
+                    r = novel_core.process_novel(
+                        src, dst, t, opts,
+                        log=lambda m, lv="info": self.q.put(
+                            ("log", m if m.startswith("  ") else "  " + m, lv)),
+                        progress=lambda a, b: self.q.put(("sub", a, b)))
+                    if r.ok:
+                        self.q.put(("log", "      ✓ %s  %s  %.1f MB%s"
+                                    % (os.path.basename(dst), r.msg, r.size_mb,
+                                       "（已覆盖）" if overwriting else ""), "ok"))
+                        done += 1
+                        if inplace:
+                            self.q.put(("rescan", src, src))
+                    else:
+                        self.q.put(("log", "      ✗ %s" % r.msg, "err"))
+                        failed += 1
+                except Exception as e:
+                    msg = str(e).strip() or e.__class__.__name__
+                    self.q.put(("log", "      ✗ 出错：%s" % msg, "err"))
+                    failed += 1
+                self.q.put(("progress", idx, total, name))
+
+            self.q.put(("done", done, skipped, failed))
+
+        self.worker = threading.Thread(target=run, daemon=True)
+        self.worker.start()
+
     def on_stop(self):
         self.stop_flag.set()
         self.status.configure(text="正在停止…")
@@ -1325,20 +1741,35 @@ class App:
                     self.busy = False
                     self._set_busy_ui(False)
                     self.pbar.configure(maximum=100, value=0)
-                    n_todo = sum(1 for i in self.infos.values()
-                                 if i.get("verdict") in ("需放大", "需缩小"))
-                    n_ok = sum(1 for i in self.infos.values() if i.get("verdict") == "点对点")
-                    n_txt = sum(1 for i in self.infos.values() if i.get("verdict") == "文字版")
-                    n_bad = sum(1 for i in self.infos.values() if i.get("err"))
-                    self.status.configure(
-                        text="扫描完成：需处理 %d · 点对点 %d · 文字版 %d · 失败 %d"
-                             % (n_todo, n_ok, n_txt, n_bad))
-                    if not msg[1]:
-                        self.log("扫描完成：需处理 %d、点对点 %d、文字版 %d、失败 %d"
-                                 % (n_todo, n_ok, n_txt, n_bad),
-                                 "warn" if n_bad else "info")
-                        if n_todo == 0 and n_bad == 0:
-                            self.log("所有文件都已是目标分辨率，无需处理。", "ok")
+                    if self.module == "novel":
+                        n_todo = sum(1 for i in self.infos.values()
+                                     if isinstance(i.get("need"), int) and i["need"] > 0)
+                        n_ok = sum(1 for i in self.infos.values() if i.get("need") == 0)
+                        n_bad = sum(1 for i in self.infos.values() if i.get("err"))
+                        self.status.configure(
+                            text="扫描完成：需处理 %d · 已适配 %d · 失败 %d"
+                                 % (n_todo, n_ok, n_bad))
+                        if not msg[1]:
+                            self.log("扫描完成：需处理 %d、已适配 %d、失败 %d"
+                                     % (n_todo, n_ok, n_bad),
+                                     "warn" if n_bad else "info")
+                            if n_todo == 0 and n_bad == 0 and self.infos:
+                                self.log("所有书都已是目标尺寸，无需处理。", "ok")
+                    else:
+                        n_todo = sum(1 for i in self.infos.values()
+                                     if i.get("verdict") in ("需放大", "需缩小"))
+                        n_ok = sum(1 for i in self.infos.values() if i.get("verdict") == "点对点")
+                        n_txt = sum(1 for i in self.infos.values() if i.get("verdict") == "文字版")
+                        n_bad = sum(1 for i in self.infos.values() if i.get("err"))
+                        self.status.configure(
+                            text="扫描完成：需处理 %d · 点对点 %d · 文字版 %d · 失败 %d"
+                                 % (n_todo, n_ok, n_txt, n_bad))
+                        if not msg[1]:
+                            self.log("扫描完成：需处理 %d、点对点 %d、文字版 %d、失败 %d"
+                                     % (n_todo, n_ok, n_txt, n_bad),
+                                     "warn" if n_bad else "info")
+                            if n_todo == 0 and n_bad == 0:
+                                self.log("所有文件都已是目标分辨率，无需处理。", "ok")
                 elif kind == "rescan":
                     self._dirty.add(msg[1])
                 elif kind == "done":

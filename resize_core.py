@@ -910,6 +910,37 @@ def replace_output(dst: str) -> None:
         "关掉后重试（%s）" % (os.path.basename(dst), last))
 
 
+def unzip_tolerant(src: str, dest: str):
+    """把压缩包解到 dest，CRC 校验失败也尽量把数据读出来。
+
+    来源包损坏不算罕见（实测 57 本里 3 本 Bad CRC），直接 z.read() 会整本失败，
+    但只要关掉 CRC 校验，数据本身通常还是完整的。返回读取失败的条目名列表。
+    """
+    bad = []
+    with zipfile.ZipFile(src) as z:
+        for info in z.infolist():
+            target = os.path.join(dest, info.filename.replace("/", os.sep))
+            if info.is_dir():
+                os.makedirs(target, exist_ok=True)
+                continue
+            parent = os.path.dirname(target)
+            if parent:
+                os.makedirs(parent, exist_ok=True)
+            try:
+                with z.open(info) as fh:
+                    try:
+                        fh._expected_crc = None      # 关掉 CRC 校验
+                    except Exception:
+                        pass
+                    data = fh.read()
+            except Exception:
+                bad.append(info.filename)
+                continue
+            with open(target, "wb") as out:
+                out.write(data)
+    return bad
+
+
 def pack_epub(work: str, dst: str) -> None:
     tmp = dst + ".mrz_tmp"
     if os.path.exists(tmp):
