@@ -358,13 +358,20 @@ _NAMED_ENT = {"nbsp": "160", "mdash": "8212", "ndash": "8211", "hellip": "8230",
 
 
 class NovelTarget:
-    """轻小说的目标：贴屏的宽高 + 混排页的版心宽。"""
+    """轻小说的目标：贴屏的宽高 + 混排页的版心宽 + 跨页旋转策略。
+
+    旋转方向跟着目标走而不是跟着 Options 走，这样 scan_novel() 与
+    process_epub_novel() 用同一个对象判定，不会出现「判定说不用转、
+    处理却转了」这类前后不一致。
+    """
 
     def __init__(self, screen_w: int = 1440, screen_h: int = 1920,
-                 column_w: int = 1300):
+                 column_w: int = 1300, rot_on: bool = True, rot_dir: int = 1):
         self.w = max(200, int(screen_w))
         self.h = max(200, int(screen_h))
         self.column = max(100, min(int(column_w), self.w))
+        self.rot_on = bool(rot_on)
+        self.rot_dir = 2 if int(rot_dir) == 2 else 1     # 1=顺时针 2=逆时针
 
     def plan(self, w: int, h: int):
         """等比装进屏幕，不裁切、不拉伸。"""
@@ -373,11 +380,26 @@ class NovelTarget:
         th = max(2, int(round(h * s)))
         return tw + (tw % 2), th + (th % 2)
 
+    def rot_of(self, w: int, h: int) -> int:
+        """该图是否需要旋转：开关打开、目标竖屏、宽度明显大于高度。"""
+        if not self.rot_on:
+            return 0
+        if self.w >= self.h:            # 横屏目标，转了反而错
+            return 0
+        if w < h * ROT_RATIO:           # 4:3 的横插画不该转
+            return 0
+        return self.rot_dir
+
     def suffix(self) -> str:
         return "_%d屏" % self.h
 
     def label(self) -> str:
-        return "屏幕 %d×%d，版心 %d" % (self.w, self.h, self.column)
+        txt = "屏幕 %d×%d，版心 %d" % (self.w, self.h, self.column)
+        if self.rot_on:
+            txt += "，跨页%s 90°" % ("顺时针" if self.rot_dir == 1 else "逆时针")
+        else:
+            txt += "，跨页不旋转"
+        return txt
 
 
 def _body_of(text: str) -> str:
@@ -443,7 +465,55 @@ def _set_viewport(text: str, tw: int, th: int):
     return text, False
 
 
+def _drop_viewport(text: str) -> str:
+    """删掉 <meta name="viewport">。
+
+    部分阅读器（Calibre 自带的查看器）见到 viewport 就把整页当作固定版式，
+    再把页面框撑满窗口；窗口比例偏离图片比例时，图就被非等比拉伸。
+    图本身已经有确定像素尺寸，viewport 是冗余的。
+    """
+    return META_RE.sub(
+        lambda m: "" if "viewport" in m.group(0).lower() else m.group(0), text)
+
+
+def _put_attr(tag: str, name: str, value: str) -> str:
+    """在标签里设置一个属性：已有就替换，没有就插到标签名后面。"""
+    if re.search(r'\b%s\s*=' % name, tag):
+        return re.sub(r'(\b%s\s*=\s*")[^"]*(")' % name,
+                      lambda m: m.group(1) + value + m.group(2), tag, count=1)
+    m = re.match(r"<[a-zA-Z:]+", tag)
+    if not m:
+        return tag
+    return tag[:m.end()] + ' %s="%s"' % (name, value) + tag[m.end():]
+
+
 def _fix_svg_attrs(text: str, tw: int, th: int) -> str:
+    """把整页插图的 svg 固定成图片的实际像素尺寸。
+
+    原书写法是 <svg width="100%" height="100%" viewBox="...">，尺寸完全交给
+    容器。窗口比例一变（比如 Calibre 阅读器窗口化、非 4:3），宽高就被各自拉
+    到容器尺寸，图跟着非等比变形。所以这里做三件事：
+
+    1. width / height 写成确定的像素，不再用百分比；
+    2. 显式 preserveAspectRatio="xMidYMid meet"，任何引擎都只能等比缩放；
+    3. 留 max-width / max-height:100%，比图更窄的屏幕仍然能整体缩下去。
+    """
+    def fix_svg_tag(m):
+        tag = _put_attr(m.group(0), "width", str(tw))
+        tag = _put_attr(tag, "height", str(th))
+        if not re.search(r"preserveAspectRatio\s*=", tag):
+            tag = _put_attr(tag, "preserveAspectRatio", "xMidYMid meet")
+        cap = "max-width:100%;max-height:100%"
+        if re.search(r'\bstyle\s*=\s*"', tag):
+            tag = re.sub(r'(\bstyle\s*=\s*")', lambda m: m.group(1) + cap + ";",
+                         tag, count=1)
+        elif tag.rstrip().endswith("/>"):
+            tag = tag.rstrip()[:-2].rstrip() + ' style="%s"/>' % cap
+        else:
+            tag = tag.rstrip()[:-1].rstrip() + ' style="%s">' % cap
+        return tag
+
+    text = re.sub(r"<svg\b[^>]*>", fix_svg_tag, text, count=1)
     text = re.sub(r'(viewBox\s*=\s*"0 0 )\d+\s+\d+(")',
                   lambda m: "%s%d %d%s" % (m.group(1), tw, th, m.group(2)),
                   text, count=1)
@@ -454,21 +524,29 @@ def _fix_svg_attrs(text: str, tw: int, th: int) -> str:
     return text
 
 
-def _img_full_width(tag: str) -> str:
-    """给 img 设 width:100%，并保留自闭合斜杠——XHTML 里丢了 /> 就是致命错误。"""
+def _img_fixed(tag: str, tw: int, th: int) -> str:
+    """整页插图的 img：不给固定宽高，只给"不许变形"的约束。
+
+    宽高属性一旦写死，部分阅读器会拿它当硬框：宽度被容器压小、高度却仍按
+    属性值撑开，图就被纵向拉长。这里干脆去掉 width/height 属性，让图片按
+    自身像素尺寸显示，再用 max-width / max-height 兜住容器，最后加
+    object-fit:contain —— 万一某个阅读器强行给元素设了宽高，图片也只会
+    在框内等比缩放、留白，而不是被拉伸。
+    """
+    tag = re.sub(r'\s+\bwidth\s*=\s*"[^"]*"', "", tag, count=1)
+    tag = re.sub(r'\s+\bheight\s*=\s*"[^"]*"', "", tag, count=1)
+    style = "max-width:100%;max-height:100%;height:auto;object-fit:contain"
     if re.search(r'\bstyle\s*=\s*"[^"]*"', tag):
-        return re.sub(r'\bstyle\s*=\s*"[^"]*"',
-                      'style="width:100%;height:auto"', tag, count=1)
+        return re.sub(r'\bstyle\s*=\s*"[^"]*"', 'style="%s"' % style, tag, count=1)
     tail = "/>" if tag.rstrip().endswith("/>") else ">"
     body = tag.rstrip()[:-len(tail)].rstrip()
-    return body + ' style="width:100%;height:auto"' + tail
+    return body + ' style="%s"' % style + tail
 
 
 def _plan_page(w: int, h: int, target: NovelTarget):
     """整页插图：先判断是否转 90°，再按旋转后的方向贴屏。"""
-    rot = 0
-    if w > h * ROT_RATIO:
-        rot = 1
+    rot = target.rot_of(w, h)
+    if rot:
         w, h = h, w
     tw, th = target.plan(w, h)
     return tw, th, rot
@@ -520,8 +598,15 @@ def _do_page(text: str, page_path: str, target: NovelTarget, opts,
     if kind == "A":
         text = _fix_svg_attrs(text, tw, th)
     else:
-        text = IMG_RE.sub(lambda m: _img_full_width(m.group(0)), text, count=1)
-    text, _ = _set_viewport(text, tw, th)
+        text = IMG_RE.sub(lambda m: _img_fixed(m.group(0), tw, th), text, count=1)
+    # 不再写 <meta viewport>。
+    #
+    # 原来给整页插图加 viewport（width=图宽, height=图高），本意是让阅读器
+    # 按这张图的尺寸排版。但有些阅读器（Calibre 自带的查看器就是）见到
+    # viewport 就把整页当成"固定版式"，再把页面框撑满窗口——窗口比例一偏离
+    # 图片比例，图就被非等比拉伸。而图本身已经有确定像素尺寸，viewport 对
+    # 掌阅这类阅读器是冗余的，去掉更安全。
+    text = _drop_viewport(text)
     return text
 
 
@@ -559,19 +644,17 @@ def _do_mixed(text: str, page_path: str, target: NovelTarget,
         st["done"] += 1
         st["inline"] += 1
 
-        # 标签上若写死了更大的 width，一并改小，否则阅读器仍按老宽度排版
-        def fix_w(mm):
-            try:
-                v = int(mm.group(2))
-            except Exception:
-                return mm.group(0)
-            if v <= col:
-                return mm.group(0)
-            return mm.group(1) + str(col) + mm.group(3)
+        # 标签上若写死了尺寸，宽高必须按同一比例一起改。
+        # 只改 width 会留下旧 height，阅读器就按那个高度硬拉——正是拉伸的来源。
+        tag = _put_attr(tag, "width", str(col))
+        tag = _put_attr(tag, "height", str(nh))
+        style = "max-width:100%;height:auto"
+        if re.search(r'\bstyle\s*=\s*"[^"]*"', tag):
+            tag = re.sub(r'\bstyle\s*=\s*"[^"]*"', 'style="%s"' % style, tag, count=1)
+        return tag
 
-        return re.sub(r'(\bwidth\s*=\s*")(\d+)(")', fix_w, tag, count=1)
-
-    return IMG_RE.sub(repl, text)
+    new = IMG_RE.sub(repl, text)
+    return _drop_viewport(new) if new != text else text
 
 
 def process_epub_novel(src: str, dst: str, target: NovelTarget, opts,

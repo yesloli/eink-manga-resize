@@ -79,6 +79,7 @@ DEFAULT_CFG = {
     "nv_w": 1440,                   # 屏幕宽
     "nv_h": 1920,                   # 屏幕高
     "nv_col": 1300,                 # 版心宽
+    "nv_rot_on": True,              # 跨页旋转总开关
     "nv_rot": 2,                    # 跨页旋转方向：1=顺时针 2=逆时针
 }
 
@@ -679,16 +680,24 @@ class App:
 
         ttk.Label(pane, text="跨页旋转", style="Card.TLabel").grid(
             row=6, column=0, sticky="w", padx=10)
-        self.nv_rot_var = tk.StringVar(value="逆时针")
         rf = ttk.Frame(pane, style="Card.TFrame")
         rf.grid(row=6, column=1, columnspan=3, sticky="w")
+        self.nv_rot_on_var = tk.BooleanVar(value=True)
+        self.nv_rot_on = ttk.Checkbutton(
+            rf, text="启用", variable=self.nv_rot_on_var,
+            command=self.on_novel_rot)
+        self.nv_rot_on.pack(side="left", padx=(0, 10))
+        self.nv_rot_var = tk.StringVar(value="逆时针")
+        self.nv_rot_rbs = []
         for txt in ("逆时针", "顺时针"):
-            ttk.Radiobutton(rf, text=txt, value=txt, variable=self.nv_rot_var,
-                            command=self.delay_save).pack(side="left", padx=(0, 12))
+            rb = ttk.Radiobutton(rf, text=txt, value=txt, variable=self.nv_rot_var,
+                                 command=self.delay_save)
+            rb.pack(side="left", padx=(0, 10))
+            self.nv_rot_rbs.append(rb)
 
         ttk.Label(pane, justify="left", wraplength=330, style="Hint.TLabel",
-                  text="宽高比超过 1.35 的整页插图转 90° 后撑满整页，看时把设备转过来。"
-                       "方向反了就换另一个。").grid(
+                  text="宽高比超过 1.35 的整页插图转 90° 后撑满整页，"
+                       "看时把设备转过来；方向反了就换另一个。").grid(
             row=7, column=0, columnspan=4, sticky="w", padx=10, pady=(3, 0))
 
         box = tk.Frame(pane, bg="#f2f6ff", highlightbackground="#d7e3fb",
@@ -703,7 +712,7 @@ class App:
         rules.grid(row=9, column=0, columnspan=4, sticky="ew", padx=10, pady=(2, 8))
         tk.Label(rules, text="这个模式怎么处理", bg=CARD, fg=MUTED,
                  font=("Microsoft YaHei UI", 8, "bold")).pack(anchor="w")
-        for line in ("插图页：等比贴满屏幕，宽图转 90° 后撑满整页",
+        for line in ("插图页：等比贴满屏幕；开启旋转时宽图转 90°",
                      "混排页：内嵌图缩到版心宽，排版结构一点不动",
                      "文字页：不碰",
                      "改完自动做结构校验，改坏的页会放弃改动并提示"):
@@ -714,6 +723,12 @@ class App:
         # 手输数字也要即时生效，Spinbox 的 command 只响应箭头
         for v in (self.nv_w_var, self.nv_h_var, self.nv_col_var):
             v.trace_add("write", lambda *a: self.on_novel_input())
+
+    def on_novel_rot(self, *_):
+        state = "normal" if self.nv_rot_on_var.get() else "disabled"
+        for rb in self.nv_rot_rbs:
+            rb.configure(state=state)
+        self.on_novel_input()
 
     def on_novel_input(self, *_):
         try:
@@ -727,10 +742,12 @@ class App:
             if c > w:
                 self.nv_sum.configure(text="版心宽不能大于屏幕宽。")
             else:
+                rot = ("跨页%s 90°" % self.nv_rot_var.get()
+                       if self.nv_rot_on_var.get() else "跨页不旋转")
                 self.nv_sum.configure(
                     text="本次输出：屏幕 %d×%d，版心 %d（%.1f%%）\n"
-                         "插图页贴屏，混排页内嵌图贴版心；文件名后缀 %s"
-                    % (w, int(self.nv_h_var.get() or 0), c, c / float(w) * 100,
+                         "%s；文件名后缀 %s"
+                    % (w, int(self.nv_h_var.get() or 0), c, c / float(w) * 100, rot,
                        novel_core.NovelTarget(w, int(self.nv_h_var.get() or 1920), c).suffix()))
         self.delay_save()
 
@@ -830,8 +847,9 @@ class App:
         self.nv_w_var.set(int(c.get("nv_w", 1440) or 1440))
         self.nv_h_var.set(int(c.get("nv_h", 1920) or 1920))
         self.nv_col_var.set(int(c.get("nv_col", 1300) or 1300))
+        self.nv_rot_on_var.set(bool(c.get("nv_rot_on", True)))
         self.nv_rot_var.set("顺时针" if int(c.get("nv_rot", 2) or 2) == 1 else "逆时针")
-        self.on_novel_input()
+        self.on_novel_rot()
         # 恢复上次的模块
         if c.get("module") == "novel":
             self.module = "comic"          # 让 set_module 认为发生了切换
@@ -880,7 +898,10 @@ class App:
             c = int(self.nv_col_var.get())
         except Exception:
             w, h, c = 1440, 1920, 1300
-        return novel_core.NovelTarget(w, h, c)
+        return novel_core.NovelTarget(
+            w, h, c,
+            rot_on=bool(self.nv_rot_on_var.get()),
+            rot_dir=2 if "逆" in self.nv_rot_var.get() else 1)
 
     def gen_test_page(self):
         path = filedialog.asksaveasfilename(
@@ -1049,6 +1070,7 @@ class App:
             "nv_w": _int(self.nv_w_var, 1440),
             "nv_h": _int(self.nv_h_var, 1920),
             "nv_col": _int(self.nv_col_var, 1300),
+            "nv_rot_on": bool(self.nv_rot_on_var.get()),
             "nv_rot": 1 if "顺" in self.nv_rot_var.get() else 2,
         })
         try:
@@ -1266,6 +1288,11 @@ class App:
         self.count_lbl.configure(text="")
 
     def refresh_tree(self):
+        # 先把已经不在列表里的扫描结果丢掉，否则移除文件后统计、判定仍会
+        # 把旧条目算进去（例如换模块后残留的「读取失败」）
+        alive = set(self.files)
+        if len(self.infos) > len(alive):
+            self.infos = {p: v for p, v in self.infos.items() if p in alive}
         self.tree.delete(*self.tree.get_children())
         for p in self.files:
             info = self.infos.get(p)
@@ -1586,10 +1613,11 @@ class App:
             return
         self.save_now()
 
+        # 旋转策略挂在 NovelTarget 上（见 current_novel_target），
+        # 这里只传缩放与输出参数，避免两处各说一套。
         opts = core.Options(quality=2,
                             overwrite=bool(self.overwrite_var.get()),
-                            ffmpeg=self.ffmpeg, calibre=self.calibre,
-                            rotate_dir=2 if self.nv_rot_var.get() == "逆时针" else 1)
+                            ffmpeg=self.ffmpeg, calibre=self.calibre)
 
         inplace = self.out_var.get() == "inplace"
         out_dir = None
