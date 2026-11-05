@@ -27,11 +27,11 @@ jobs:
         run: pip install -r requirements-dev.txt
 
       - name: 语法检查
-        run: python -m py_compile manga_resize.py resize_core.py readers_db.py build_icon.py
+        run: python -m py_compile manga_resize.py resize_core.py novel_core.py readers_db.py build_icon.py
 
       - name: 导入检查（确保引擎与机型库能被加载）
         run: |
-          python -c "import resize_core, readers_db; print('models:', sum(len(v) for v in readers_db.BRANDS.values()))"
+          python -c "import resize_core, novel_core, readers_db; print('models:', sum(len(v) for v in readers_db.BRANDS.values()))"
 
       - name: 机型参数一致性校验（对角线像素 ÷ 英寸 ≈ ppi）
         run: python -c "import math, readers_db as r; bad=[(b,d[0]) for b,v in r.BRANDS.items() for d in v if d[3]>0 and abs(math.hypot(d[1],d[2])/d[3]-d[4])/d[4]>0.06]; print('inconsistent:', bad); raise SystemExit(1 if bad else 0)"
