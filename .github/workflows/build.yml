@@ -93,11 +93,4 @@ jobs:
         with:
           files: dist/eink-manga-resize-*-windows-x64.exe
           generate_release_notes: true
-          body: |
-            下载下面的 `eink-manga-resize-${{ github.ref_name }}-windows-x64.exe`，双击即用，无需安装。
-            程序内的界面名是「墨水屏阅读器点对点适配」。
-
-            处理 MOBI / AZW3 需要另外安装 [Calibre](https://calibre-ebook.com/download_windows)；
-            处理 EPUB / ZIP / CBZ / PDF 不需要任何额外依赖。
-
-            首次运行如遇 SmartScreen 提示，选「更多信息 → 仍要运行」——单文件 EXE 未做代码签名，属正常现象。
+          body_path: .github/release-notes.md

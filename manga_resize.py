@@ -23,7 +23,7 @@ import novel_core
 import readers_db
 
 APP_NAME = "墨水屏阅读器点对点适配"
-APP_VER = "1.1"
+APP_VER = "1.2"
 CALIBRE_URL = "https://calibre-ebook.com/download_windows"
 KF8_EXT = (".mobi", ".azw3", ".azw", ".prc")
 
