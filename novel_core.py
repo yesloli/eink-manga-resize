@@ -611,12 +611,67 @@ def _do_page(text: str, page_path: str, target: NovelTarget, opts,
 
 
 def _do_mixed(text: str, page_path: str, target: NovelTarget,
-              jobs: list, st: dict, page_used: set) -> str:
-    """混排页：只把内嵌图缩到版心宽，结构一点都不动。"""
+              jobs: list, st: dict, page_used: set,
+              gallery: bool = False) -> str:
+    """混排页 / 图集页。
+
+    混排页（图文同页）→ 内嵌图缩到版心宽，排版结构不动。
+    图集页（整页只有图，可能连着好几张）→ 按插图页的规则贴屏。
+
+    两者都必须处理 <svg><image>：日系轻小说大量用 svg 包整页图，只认 <img>
+    会整片漏掉——实测有一本 16 张插图只处理到 1 张（封面），其余 15 张没动。
+    """
     base = os.path.dirname(page_path)
     col = target.column
 
-    def repl(m):
+    def decide(p):
+        """返回 (tw, th, rot, 是否需要重采样)；None 表示这张图不用管。"""
+        size = core.img_size_file(p)
+        if not size:
+            return None
+        w0, h0 = size
+        if min(w0, h0) < MIN_SIDE:
+            return None
+        if gallery:
+            tw, th, rot = _plan_page(w0, h0, target)
+            near = (rot == 0
+                    and abs(tw - w0) <= max(2, w0 * TOLERANCE)
+                    and abs(th - h0) <= max(2, h0 * TOLERANCE))
+            return tw, th, rot, not near
+        # 混排页的图要正好占满版心：比版心宽的缩，略窄的放大。
+        # 只有明显是小图（示意图、装饰条）才不放大，否则会糊成一团。
+        if w0 < col * 0.6:
+            return w0, h0, 0, False
+        nh = max(2, int(round(h0 * col / float(w0))))
+        near = (abs(w0 - col) <= max(2, col * TOLERANCE)
+                and abs(h0 - nh) <= max(2, h0 * TOLERANCE))
+        return col, nh, 0, not near
+
+    def handle_svg(m):
+        block = m.group(0)
+        hm = HREF_RE.search(block)
+        if not hm:
+            return block
+        p = _resolve(base, hm.group(1))
+        if not p or not os.path.isfile(p):
+            return block
+        if p in page_used:
+            # 这张图已经是某页的贴屏插图，再缩会破坏那一页的 1:1
+            st["shared"] += 1
+            return block
+        d = decide(p)
+        if not d:
+            return block
+        tw, th, rot, resize = d
+        if gallery:
+            page_used.add(p)
+        if resize:
+            jobs.append((p, p, tw, th, rot))
+            st["done"] += 1
+            st["inline"] += 1
+        return _fix_svg_attrs(block, tw, th)
+
+    def handle_img(m):
         tag = m.group(0)
         sm = SRC_RE.search(tag)
         if not sm:
@@ -625,35 +680,22 @@ def _do_mixed(text: str, page_path: str, target: NovelTarget,
         if not p or not os.path.isfile(p):
             return tag
         if p in page_used:
-            # 同一份文件已经是某张整页插图，按贴屏尺寸处理过；
-            # 这里再缩会把那一页的 1:1 破坏掉，所以跳过。
             st["shared"] += 1
             return tag
-        size = core.img_size_file(p)
-        if not size:
+        d = decide(p)
+        if not d:
             return tag
-        w0, h0 = size
-        if min(w0, h0) < MIN_SIDE:
-            return tag
-        if w0 <= col * 1.01:
-            return tag                 # 不比版心宽，没必要动，也不放大
-        if w0 < col * 0.5:
-            return tag
-        nh = max(2, int(round(h0 * col / float(w0))))
-        jobs.append((p, p, col, nh, 0))
-        st["done"] += 1
-        st["inline"] += 1
+        tw, th, rot, resize = d
+        if gallery:
+            page_used.add(p)
+        if resize:
+            jobs.append((p, p, tw, th, rot))
+            st["done"] += 1
+            st["inline"] += 1
+        return _img_fixed(tag, tw, th)
 
-        # 标签上若写死了尺寸，宽高必须按同一比例一起改。
-        # 只改 width 会留下旧 height，阅读器就按那个高度硬拉——正是拉伸的来源。
-        tag = _put_attr(tag, "width", str(col))
-        tag = _put_attr(tag, "height", str(nh))
-        style = "max-width:100%;height:auto"
-        if re.search(r'\bstyle\s*=\s*"[^"]*"', tag):
-            tag = re.sub(r'\bstyle\s*=\s*"[^"]*"', 'style="%s"' % style, tag, count=1)
-        return tag
-
-    new = IMG_RE.sub(repl, text)
+    new = re.sub(r"<svg\b.*?</svg>", handle_svg, text, flags=re.S | re.I)
+    new = IMG_RE.sub(handle_img, new)
     return _drop_viewport(new) if new != text else text
 
 
@@ -662,7 +704,7 @@ def process_epub_novel(src: str, dst: str, target: NovelTarget, opts,
     """处理一本 EPUB。返回 core.Result。"""
     work = tempfile.mkdtemp(prefix="ln_")
     st = {"page": 0, "mixed": 0, "text": 0, "skip": 0, "same": 0,
-          "done": 0, "rot": 0, "inline": 0, "broke": 0, "shared": 0}
+          "done": 0, "rot": 0, "inline": 0, "broke": 0, "shared": 0, "gal": 0}
     jobs = []
     try:
         bad = core.unzip_tolerant(src, work)
@@ -687,7 +729,13 @@ def process_epub_novel(src: str, dst: str, target: NovelTarget, opts,
             if n_img == 0:
                 st["text"] += 1
                 continue
-            kind = "page" if (n_img == 1 and _text_len(body) < 10) else "mixed"
+            txt = _text_len(body)
+            if n_img == 1 and txt < 10:
+                kind = "page"
+            elif txt < 10:
+                kind = "gallery"          # 整页只有图、没有正文，可能是多张
+            else:
+                kind = "mixed"
             items.append((page, raw, kind))
 
         page_used = set()
@@ -703,12 +751,15 @@ def process_epub_novel(src: str, dst: str, target: NovelTarget, opts,
             with open(page, "w", encoding="utf-8") as f:
                 f.write(new)
 
-        # 第一遍只处理插图页：先确定哪些图按「贴屏」尺寸走
+        # 第一遍处理插图页与图集页：先确定哪些图按「贴屏」尺寸走
         for page, raw, kind in items:
-            if kind != "page":
-                continue
-            apply(page, raw, _do_page(raw, page, target, opts, jobs, st, page_used))
-            st["page"] += 1
+            if kind == "page":
+                apply(page, raw, _do_page(raw, page, target, opts, jobs, st, page_used))
+                st["page"] += 1
+            elif kind == "gallery":
+                apply(page, raw, _do_mixed(raw, page, target, jobs, st, page_used,
+                                           gallery=True))
+                st["gal"] += 1
         # 第二遍处理混排页：被插图页占用的图不再缩到版心
         for page, raw, kind in items:
             if kind != "mixed":
@@ -716,8 +767,10 @@ def process_epub_novel(src: str, dst: str, target: NovelTarget, opts,
             apply(page, raw, _do_mixed(raw, page, target, jobs, st, page_used))
             st["mixed"] += 1
 
-        log("      插图页 %d（旋转 %d）· 混排页 %d（内嵌图 %d）· 文字页 %d · 跳过小图 %d"
-            % (st["page"], st["rot"], st["mixed"], st["inline"], st["text"], st["skip"]))
+        log("      插图页 %d（旋转 %d）· 图集页 %d · 混排页 %d（内嵌图 %d）"
+            "· 文字页 %d · 跳过小图 %d"
+            % (st["page"], st["rot"], st["gal"], st["mixed"], st["inline"],
+               st["text"], st["skip"]))
         # 同一张图可能被多个页面引用（封面、目录缩略图），并发写同一个临时文件
         # 会撞出 WinError 5，所以按路径去重，取目标面积最大的那次
         uniq = {}
@@ -831,22 +884,45 @@ def scan_novel(path: str, target: NovelTarget) -> dict:
                         continue
                     refs.append(posixpath.normpath(
                         posixpath.join(base, rel.split("#")[0].replace("\\", "/"))))
-                kind = "page" if (len(raw_refs) == 1 and _text_len(body) < 10) else "mixed"
+                tl = _text_len(body)
+                if len(raw_refs) == 1 and tl < 10:
+                    kind = "page"
+                elif tl < 10:
+                    kind = "gallery"      # 整页只有图、没有正文，可能连排多张
+                else:
+                    kind = "mixed"
                 parsed.append((kind, refs))
 
-            # 先统计插图页占用了哪些图——混排页里的同一份文件按贴屏处理，
-            # 不能算成「还要缩到版心」，否则判定会和实际处理对不上
+            def need_screen(ref):
+                size = sizes.get(ref)
+                if not size or min(size) < MIN_SIDE:
+                    return False
+                tw, th, rot = _plan_page(size[0], size[1], target)
+                return (bool(rot)
+                        or abs(tw - size[0]) > max(2, size[0] * TOLERANCE)
+                        or abs(th - size[1]) > max(2, size[1] * TOLERANCE))
+
+            # 先统计贴屏类页面（插图页 / 图集页）占用了哪些图——混排页里的
+            # 同一份文件按贴屏处理，不能算成「还要缩到版心」
             page_used = set()
             for kind, refs in parsed:
                 if kind == "page" and refs:
+                    if need_screen(refs[0]):
+                        info["need"] += 1
                     size = sizes.get(refs[0])
                     if size and min(size) >= MIN_SIDE:
                         page_used.add(refs[0])
-                        tw, th, rot = _plan_page(size[0], size[1], target)
-                        if rot or abs(tw - size[0]) > max(2, size[0] * TOLERANCE):
+                elif kind == "gallery":
+                    for ref in refs:
+                        if ref in page_used:
+                            continue
+                        if need_screen(ref):
                             info["need"] += 1
+                        size = sizes.get(ref)
+                        if size and min(size) >= MIN_SIDE:
+                            page_used.add(ref)
             for kind, refs in parsed:
-                if kind == "page":
+                if kind in ("page", "gallery"):
                     info["page"] += 1
                     continue
                 info["mixed"] += 1
@@ -854,7 +930,12 @@ def scan_novel(path: str, target: NovelTarget) -> dict:
                     if ref in page_used:
                         continue
                     size = sizes.get(ref)
-                    if size and min(size) >= MIN_SIDE and size[0] > target.column * 1.01:
+                    if not size or min(size) < MIN_SIDE:
+                        continue
+                    col = target.column
+                    if size[0] < col * 0.6:
+                        continue
+                    if abs(size[0] - col) > max(2, col * TOLERANCE):
                         info["need"] += 1
     except Exception as e:
         info["err"] = "读取失败：%s" % e
