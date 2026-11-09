@@ -23,7 +23,7 @@ import novel_core
 import readers_db
 
 APP_NAME = "墨水屏阅读器点对点适配"
-APP_VER = "1.2"
+APP_VER = "1.2.1"
 CALIBRE_URL = "https://calibre-ebook.com/download_windows"
 KF8_EXT = (".mobi", ".azw3", ".azw", ".prc")
 
@@ -65,7 +65,8 @@ DEFAULT_CFG = {
     "quality": 2,
     "out_mode": "same",             # same | custom
     "out_dir": "",
-    "recursive": False,
+    "scan_subdirs": True,           # 添加文件夹时递归所有子目录（旧键 recursive 默认是 False，
+                                    # 换键名正好让老配置也吃到新的默认值）
     "overwrite": False,
     "rotate_spread": False,
     "rotate_dir": 1,
@@ -572,7 +573,7 @@ class App:
         self.recursive_var = tk.BooleanVar(value=False)
         self.overwrite_var = tk.BooleanVar(value=False)
         self.chk_recursive = ttk.Checkbutton(
-            tab2, text="添加文件夹时包含子目录", variable=self.recursive_var,
+            tab2, text="添加文件夹时包含子目录（默认，全部层级）", variable=self.recursive_var,
             command=self.delay_save)
         self.chk_recursive.grid(row=4, column=0, columnspan=3, sticky="w",
                                 padx=10, pady=(10, 2))
@@ -833,7 +834,7 @@ class App:
         self.q_var.set(int(c.get("quality", 2) or 2))
         self.out_var.set(c.get("out_mode", "same"))
         self.out_entry.insert(0, c.get("out_dir", ""))
-        self.recursive_var.set(bool(c.get("recursive")))
+        self.recursive_var.set(bool(c.get("scan_subdirs", True)))
         self.overwrite_var.set(bool(c.get("overwrite")))
         self.rot_var.set(bool(c.get("rotate_spread")))
         self.rot_dir_var.set("右转 90°（顺时针）"
@@ -1058,7 +1059,7 @@ class App:
             "quality": _int(self.q_var, 2),
             "out_mode": self.out_var.get(),
             "out_dir": self.out_entry.get().strip(),
-            "recursive": bool(self.recursive_var.get()),
+            "scan_subdirs": bool(self.recursive_var.get()),
             "overwrite": bool(self.overwrite_var.get()),
             "rotate_spread": bool(self.rot_var.get()),
             "rotate_dir": 1 if "顺" in self.rot_dir_var.get() else 2,
@@ -1225,6 +1226,17 @@ class App:
             paths = [event.data]
         self.add_paths(list(paths))
 
+    @staticmethod
+    def _has_subdir(p):
+        """目录里是否还有下一层目录（只探一层，够用来提示）。"""
+        if not os.path.isdir(p):
+            return False
+        try:
+            with os.scandir(p) as it:
+                return any(e.is_dir(follow_symlinks=False) for e in it)
+        except OSError:
+            return False
+
     def add_files(self):
         types = [("支持的电子书", "*.epub *.mobi *.azw3 *.azw *.prc *.zip *.cbz *.pdf"),
                  ("EPUB", "*.epub"), ("Kindle", "*.mobi *.azw3 *.azw"),
@@ -1242,9 +1254,13 @@ class App:
             self.add_paths([d])
 
     def add_paths(self, paths):
-        found = core.collect(paths, recursive=bool(self.recursive_var.get()))
+        recursive = bool(self.recursive_var.get())
+        found = core.collect(paths, recursive=recursive)
         if not found:
             self.log("没有找到支持的文件（%s）" % "、".join(core.SUPPORTED_EXT), "warn")
+            if not recursive and any(self._has_subdir(p) for p in paths):
+                self.log("这些目录下面还有子目录——「输出」页勾选"
+                         "「添加文件夹时包含子目录」，或直接拖最上层目录进来。", "warn")
             return
         added = 0
         for f in found:
@@ -1257,7 +1273,11 @@ class App:
             elif os.path.isfile(p):
                 self.cfg["last_dir"] = os.path.dirname(p)
         self.delay_save()
-        self.log("加入 %d 个文件（共 %d 个）" % (added, len(self.files)))
+        self.log("加入 %d 个文件（共 %d 个）%s"
+                 % (added, len(self.files), "，已含全部子目录" if recursive else ""))
+        if not recursive and any(self._has_subdir(p) for p in paths):
+            self.log("注意：只扫了当前这一层，子目录里的文件没加进来。"
+                     "要全部加入，去「输出」页勾选「添加文件夹时包含子目录」。", "warn")
         need = self.kf8_files()
         if need and not self._calibre_warned:
             self._calibre_warned = True

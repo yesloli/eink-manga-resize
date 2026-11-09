@@ -41,6 +41,19 @@ POINT_TOLERANCE = 2         # 高度差在此范围内算"已点对点"
 
 FILTERS = ("spline", "lanczos", "bicubic", "bilinear")
 
+# 统计正文时要先剔掉 <style>/<script>/注释。本工具处理漫画时会给每个 XHTML
+# 注入一段约 260 字的 CSS 覆盖，80 页就凑到两万字——不剔除的话，处理完再扫描
+# 会被当成「文字版」，列表里显示的就不是「点对点」了。
+_NOISE_RE = re.compile(r"<(style|script)\b[^>]*>.*?</\1\s*>|<!--.*?-->", re.S | re.I)
+_TAG_RE = re.compile(r"<[^>]+>")
+
+
+def text_chars(html: str) -> int:
+    """粗略统计 HTML 的正文可见字符数（不含样式、脚本、注释）。"""
+    t = _NOISE_RE.sub(" ", html)
+    t = _TAG_RE.sub("", t)
+    return len(re.sub(r"\s", "", t))
+
 
 # ---------------------------------------------------------------------------
 # 环境探测
@@ -500,7 +513,7 @@ def scan_epub(path):
                 except Exception:
                     continue
                 if low.endswith((".html", ".xhtml", ".htm")):
-                    chars += len(re.sub(r"\s", "", re.sub(r"<[^>]+>", "", t)))
+                    chars += text_chars(t)
     if not hs:
         info["err"] = "包内没有图片"
         return info
@@ -1014,7 +1027,7 @@ def process_epub(src: str, dst: str, target: Target, opts: Options,
                                      errors="ignore").read()
                         except Exception:
                             continue
-                        chars += len(re.sub(r"\s", "", re.sub(r"<[^>]+>", "", t)))
+                        chars += text_chars(t)
                         if chars > TEXT_LIMIT:
                             break
                 if chars > TEXT_LIMIT:
