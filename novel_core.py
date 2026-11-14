@@ -21,6 +21,7 @@ import posixpath
 import re
 import shutil
 import tempfile
+import urllib.parse
 import xml.etree.ElementTree as ET
 import zipfile
 
@@ -436,11 +437,92 @@ def _xml_ok(text: str) -> bool:
         return False
 
 
+def _ref_variants(href: str):
+    """同一个引用可能出现的写法：原样，以及 URL 解码之后的。
+
+    有的书把中文、空格、括号写成 %XX（`../Images/%E5%B0%81%E9%9D%A2.jpg`、
+    `back%20cover.jpg`），直接按字符串拼路径是找不到文件的——整页会被判成
+    「没有图片」，工具报「已适配」，实际一张都没动。
+    """
+    rel = href.split("#")[0].strip()
+    out = [rel] if rel else []
+    if "%" in rel:
+        dec = urllib.parse.unquote(rel)
+        if dec != rel:
+            out.append(dec)
+    return out
+
+
 def _resolve(base: str, href: str):
     href = href.split("#")[0].strip()
     if not href or href.lower().startswith(("http:", "https:", "data:", "mailto:")):
         return None
-    return os.path.normpath(os.path.join(base, href.replace("/", os.sep)))
+    first = None
+    for rel in _ref_variants(href):
+        p = os.path.normpath(os.path.join(base, rel.replace("/", os.sep)))
+        if first is None:
+            first = p
+        if os.path.isfile(p):
+            return p
+    return first
+
+
+def _zip_ref(base: str, href: str, names: set, lower: dict):
+    """把页面引用换算成包内路径。大小写不一致的书也能对上（Windows 解包后
+    本来就不区分大小写，扫描端读的是 zip 名，得自己补上这一层）。"""
+    first = None
+    for rel in _ref_variants(href):
+        p = posixpath.normpath(posixpath.join(base, rel.replace("\\", "/")))
+        if first is None:
+            first = p
+        if p in names:
+            return p
+        q = lower.get(p.lower())
+        if q:
+            return q
+    return first
+
+
+_COVER_META_RE = re.compile(
+    r'<meta\b[^>]*name\s*=\s*["\']cover["\'][^>]*content\s*=\s*["\']([^"\']+)', re.I)
+_COVER_PROP_RE = re.compile(
+    r'<item\b[^>]*properties\s*=\s*["\'][^"\']*cover-image[^"\']*["\'][^>]*>', re.I)
+_ITEM_HREF_RE = re.compile(r'href\s*=\s*["\']([^"\']+)["\']', re.I)
+
+
+def _cover_path(read, names):
+    """从 OPF 里找封面图（meta name=cover 或 properties=cover-image）。
+
+    有些书的封面只登记在 manifest 里，没有任何页面引用它：正文里不显示，
+    但阅读器书架用的是这张图，不缩的话缩略图还是会被设备拉伸。
+    """
+    names = list(names)
+    lower = {n.lower(): n for n in names}
+    for n in names:
+        if not n.lower().endswith(".opf"):
+            continue
+        try:
+            opf = read(n).decode("utf-8", "ignore")
+        except Exception:
+            continue
+        href = None
+        m = _COVER_META_RE.search(opf)
+        if m:
+            item = re.search(r'<item\b[^>]*id\s*=\s*["\']%s["\'][^>]*>' % re.escape(m.group(1)),
+                             opf, re.I)
+            if item:
+                hm = _ITEM_HREF_RE.search(item.group(0))
+                if hm:
+                    href = hm.group(1)
+        if not href:
+            it = _COVER_PROP_RE.search(opf)
+            if it:
+                hm = _ITEM_HREF_RE.search(it.group(0))
+                if hm:
+                    href = hm.group(1)
+        if href:
+            return _zip_ref(posixpath.dirname(n), href, set(names), lower)
+    return None
 
 
 def _set_viewport(text: str, tw: int, th: int):
@@ -704,7 +786,8 @@ def process_epub_novel(src: str, dst: str, target: NovelTarget, opts,
     """处理一本 EPUB。返回 core.Result。"""
     work = tempfile.mkdtemp(prefix="ln_")
     st = {"page": 0, "mixed": 0, "text": 0, "skip": 0, "same": 0,
-          "done": 0, "rot": 0, "inline": 0, "broke": 0, "shared": 0, "gal": 0}
+          "done": 0, "rot": 0, "inline": 0, "broke": 0, "shared": 0, "gal": 0,
+          "cover": 0}
     jobs = []
     try:
         bad = core.unzip_tolerant(src, work)
@@ -712,13 +795,23 @@ def process_epub_novel(src: str, dst: str, target: NovelTarget, opts,
             log("      源包有 %d 个条目 CRC 损坏，已跳过校验读取" % len(bad), "warn")
 
         pages = []
+        rel_names = []
         for root, _, fs in os.walk(work):
             for f in fs:
+                fp = os.path.join(root, f)
+                rel_names.append(os.path.relpath(fp, work).replace(os.sep, "/"))
                 if f.lower().endswith(PAGE_EXT):
-                    pages.append(os.path.join(root, f))
+                    pages.append(fp)
         pages.sort()
 
         items = []
+        seen_refs = set()
+
+        def note_ref(page, href):
+            p = _resolve(os.path.dirname(page), href)
+            if p and os.path.isfile(p):
+                seen_refs.add(os.path.relpath(p, work).replace(os.sep, "/"))
+
         for page in pages:
             try:
                 raw = open(page, encoding="utf-8").read()
@@ -729,6 +822,15 @@ def process_epub_novel(src: str, dst: str, target: NovelTarget, opts,
             if n_img == 0:
                 st["text"] += 1
                 continue
+            # 记下这一页引用到的图，后面用来判断封面是不是只存在于 OPF
+            for tag in IMG_RE.findall(body):
+                m = SRC_RE.search(tag)
+                if m:
+                    note_ref(page, m.group(1))
+            for tag in SVG_IMG_RE.findall(body):
+                m = HREF_RE.search(tag)
+                if m:
+                    note_ref(page, m.group(1))
             txt = _text_len(body)
             if n_img == 1 and txt < 10:
                 kind = "page"
@@ -767,10 +869,25 @@ def process_epub_novel(src: str, dst: str, target: NovelTarget, opts,
             apply(page, raw, _do_mixed(raw, page, target, jobs, st, page_used))
             st["mixed"] += 1
 
+        # 封面：有些书只把它登记在 OPF 里，没有任何页面引用（实测 6/1913 本），
+        # 正文不受影响，但阅读器书架缩略图用的就是这张，一起处理掉
+        cover = _cover_path(
+            lambda n: open(os.path.join(work, n.replace("/", os.sep)), "rb").read(),
+            rel_names)
+        if cover and cover not in seen_refs:
+            fp = os.path.join(work, cover.replace("/", os.sep))
+            size = core.img_size_file(fp)
+            if size and min(size) >= MIN_SIDE:
+                tw, th, rot = _plan_page(size[0], size[1], target)
+                if (rot or abs(tw - size[0]) > max(2, size[0] * TOLERANCE)
+                        or abs(th - size[1]) > max(2, size[1] * TOLERANCE)):
+                    jobs.append((fp, fp, tw, th, rot))
+                    st["cover"] += 1
+
         log("      插图页 %d（旋转 %d）· 图集页 %d · 混排页 %d（内嵌图 %d）"
-            "· 文字页 %d · 跳过小图 %d"
+            "· 封面 %d · 文字页 %d · 跳过小图 %d"
             % (st["page"], st["rot"], st["gal"], st["mixed"], st["inline"],
-               st["text"], st["skip"]))
+               st["cover"], st["text"], st["skip"]))
         # 同一张图可能被多个页面引用（封面、目录缩略图），并发写同一个临时文件
         # 会撞出 WinError 5，所以按路径去重，取目标面积最大的那次
         uniq = {}
@@ -855,7 +972,10 @@ def scan_novel(path: str, target: NovelTarget) -> dict:
                     except Exception:
                         pass
             parsed = []
-            for n in z.namelist():
+            zip_names = z.namelist()
+            name_set = set(zip_names)
+            lower_map = {n.lower(): n for n in zip_names}
+            for n in zip_names:
                 if not n.lower().endswith(PAGE_EXT):
                     continue
                 try:
@@ -882,8 +1002,9 @@ def scan_novel(path: str, target: NovelTarget) -> dict:
                 for rel in raw_refs:
                     if rel.lower().startswith(("http:", "https:", "data:")):
                         continue
-                    refs.append(posixpath.normpath(
-                        posixpath.join(base, rel.split("#")[0].replace("\\", "/"))))
+                    p = _zip_ref(base, rel, name_set, lower_map)
+                    if p:
+                        refs.append(p)
                 tl = _text_len(body)
                 if len(raw_refs) == 1 and tl < 10:
                     kind = "page"
@@ -937,6 +1058,12 @@ def scan_novel(path: str, target: NovelTarget) -> dict:
                         continue
                     if abs(size[0] - col) > max(2, col * TOLERANCE):
                         info["need"] += 1
+
+            # 封面只登记在 OPF、没有任何页面引用的书，也要算进来
+            cover = _cover_path(z.read, zip_names)
+            if cover and cover not in {r for _, refs in parsed for r in refs}:
+                if need_screen(cover):
+                    info["need"] += 1
     except Exception as e:
         info["err"] = "读取失败：%s" % e
     return info
